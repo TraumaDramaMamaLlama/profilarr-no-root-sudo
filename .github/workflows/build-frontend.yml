@@ -1,0 +1,73 @@
+# GitHub Actions workflow to build the Profilarr frontend and upload dist/ as an artifact
+# Trigger: Manual (workflow_dispatch)
+name: Build Frontend (dist artifact)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install Deno
+        uses: denoland/setup-deno@v3
+        with:
+          deno-version: 'stable'
+
+      - name: Install npm dependencies
+        run: |
+          npm ci
+
+      - name: Sync deno.json imports from package.json and enable nodeModulesDir
+        run: |
+          python3 - <<'PY'
+          import json, re
+          pfile='package.json'
+          dfile='deno.json'
+          p=json.load(open(pfile))
+          d=json.load(open(dfile))
+          imports=d.get('imports',{})
+          for sec in ('dependencies','devDependencies'):
+              for name,ver in p.get(sec,{}).items():
+                  # add mapping for bare imports if not present
+                  if name not in imports:
+                      imports[name]=f"npm:{name}@{ver}"
+                  else:
+                      v=imports[name]
+                      if isinstance(v,str) and v.startswith('npm:'):
+                          m=re.match(r'^npm:([^@]+)@(.+)$', v)
+                          if m and (m.group(1) in p.get('dependencies',{}) or m.group(1) in p.get('devDependencies',{})):
+                              imports[m.group(1)]=f"npm:{m.group(1)}@{p.get('dependencies',{}).get(m.group(1), p.get('devDependencies',{}).get(m.group(1)))}"
+          d['imports']=imports
+          d['nodeModulesDir']='auto'
+          json.dump(d, open(dfile,'w'), indent=2, ensure_ascii=False)
+          print('deno.json updated')
+          PY
+
+      - name: Build frontend (Deno + Vite)
+        env:
+          APP_BASE_PATH: ./dist/build
+        run: |
+          rm -rf dist .svelte-kit
+          deno run -A npm:vite build
+
+      - name: Verify dist exists
+        run: |
+          echo "dist contents:"
+          ls -la dist || true
+          test -f dist/index.html
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: dist
